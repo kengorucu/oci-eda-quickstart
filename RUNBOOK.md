@@ -62,19 +62,28 @@ This release includes only the RTL simulation workload. Use `--demo rtl` for pre
 
 Preparation installs Verilator and GCC, compiles the circuit and runs a correctness self-test in two pods. The manifest pins the Oracle Linux container digest. Installed packages can change over time; actual inventories and source hashes are captured and compared between pods. No local Docker/Podman build is required.
 
-The controller starts in the background. It performs an excluded warm-up, then three repeats at one and two workers: eight tests per batch and 48 measured test executions. Each test runs 100 million simulated clock cycles with seeds 1000–1007. One worker runs all eight tests sequentially; two workers run four each on distinct nodes. Each simulator pod requests and is limited to two Kubernetes logical CPUs and 4 GiB RAM. The simulator is single threaded; this does not measure the node's full 16-OCPU capacity.
+The run command starts a background controller and immediately streams its progress to the terminal. It performs an excluded warm-up, then three repeats at one and two workers: eight tests per batch and 48 measured test executions. Each test runs 100 million simulated clock cycles with seeds 1000–1007. One worker runs all eight tests sequentially; two workers run four each on distinct nodes. Each simulator pod requests and is limited to two Kubernetes logical CPUs and 4 GiB RAM. The simulator is single threaded; this does not measure the node's full 16-OCPU capacity.
 
 The RTL reference measurement took approximately 18 minutes, excluding preparation and provisioning. Runtime varies. Pods expire four hours after creation. Run one controller at a time. A failed or interrupted controller retains evidence and does not automatically remeasure. Logic synthesis and static timing analysis are planned EDA additions, not deployable tests in this release.
 
-## 4. Status and export
+## 4. Monitor live and export
+
+The run command displays progress automatically: warm-up, batch 1/6 through 6/6, active workers, batch results and the final summary. The live view ends when the measurement finishes.
+
+Ctrl+C stops the live view only; the detached benchmark continues. After reconnecting, monitor the same run with:
 
 ```sh
 cd ~/e6-oke-demo
-python3 tools/demo.py status
+python3 tools/demo.py watch
+```
+
+When the output reports State: complete, export:
+
+```sh
 python3 tools/demo.py export
 ```
 
-A terminal disconnection does not itself kill the detached controller, but a Cloud Shell reset or termination can. Reconnect and run status; do not start another measurement automatically. If a dead process leaves a lock, inspect status and guest/pod activity first, then `python3 tools/demo.py unlock` can release the stale local lock.
+A terminal disconnection does not itself kill the detached controller, but a Cloud Shell reset or termination can. Reconnect with watch; do not start another measurement automatically. If a dead process leaves a lock, inspect the retained evidence and pod activity first, then `python3 tools/demo.py unlock` can release the stale local lock.
 
 The export command prints paths to a raw evidence archive and comparison.json. Download both. Load comparison.json in the page to view your results; it is read locally in your browser, not uploaded. The chart displays reported medians and derived scaling, not an independent raw-log audit. Source and binary hashes, metadata, package inventories, setup logs, raw records and summaries are saved in the result directory. Kubernetes ConfigMap checkpoints provide a second copy of completed records but do not survive cluster deletion. Do not publish raw archives by default; they can contain tenancy, cluster, node or infrastructure metadata.
 

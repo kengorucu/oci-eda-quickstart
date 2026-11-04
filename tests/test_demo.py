@@ -98,18 +98,57 @@ class OperatorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d,patch.object(demo,'HOME_RESULTS',Path(d)),patch.object(demo,'ready_nodes'),patch.object(demo,'kubectl',return_value=json.dumps(pods)),patch.object(demo.subprocess,'Popen') as popen:
             (Path(d)/'.active').mkdir()
             with self.assertRaisesRegex(RuntimeError,'run lock'):
-                demo.start()
+                demo.start(detach=True)
             popen.assert_not_called()
 
     def test_start_detaches_controller_and_saves_session(self):
         pods={'items':[{'status':{'conditions':[{'type':'Ready','status':'True'}]}}]*2}
         with tempfile.TemporaryDirectory() as d,patch.object(demo,'HOME_RESULTS',Path(d)),patch.object(demo,'ready_nodes'),patch.object(demo,'kubectl',return_value=json.dumps(pods)),patch.object(demo.subprocess,'Popen',return_value=Mock(pid=1234)) as popen,contextlib.redirect_stdout(io.StringIO()):
-            demo.start()
+            demo.start(detach=True)
             kw=popen.call_args.kwargs
             self.assertTrue(kw['start_new_session']);self.assertEqual(kw['stdin'],subprocess.DEVNULL)
             path=Path(json.loads((Path(d)/'latest.json').read_text())['session'])
             self.assertTrue((path/'status.json').exists());self.assertTrue((path/'controller.log').exists())
             self.assertEqual(json.loads((Path(d)/'.active/owner.json').read_text())['pid'],1234)
+
+    def test_watch_streams_new_progress_once_and_exits_on_completion(self):
+        import os
+        with tempfile.TemporaryDirectory() as d,contextlib.redirect_stdout(io.StringIO()) as output:
+            p=Path(d);demo.write_json(p/'status.json',{'state':'running','pid':os.getpid()})
+            (p/'controller.log').write_text('WARMUP_UNIQUE\n')
+            def complete(_):
+                with (p/'controller.log').open('a') as f:f.write('PASS_UNIQUE\n')
+                demo.write_json(p/'status.json',{'state':'complete','exit_code':0})
+            with patch.object(demo.time,'sleep',side_effect=complete),patch.object(demo.subprocess,'Popen') as launch:
+                self.assertEqual(demo.watch(p),0)
+                launch.assert_not_called()
+            self.assertEqual(output.getvalue().count('WARMUP_UNIQUE'),1)
+            self.assertEqual(output.getvalue().count('PASS_UNIQUE'),1)
+
+    def test_watch_ctrl_c_keeps_run_state_and_does_not_signal_worker(self):
+        import os
+        with tempfile.TemporaryDirectory() as d,contextlib.redirect_stdout(io.StringIO()) as output:
+            p=Path(d);demo.write_json(p/'status.json',{'state':'running','pid':os.getpid()})
+            with patch.object(demo.time,'sleep',side_effect=KeyboardInterrupt),patch.object(demo,'alive',return_value=True),patch.object(demo.os,'kill') as signal:
+                self.assertEqual(demo.watch(p),0)
+                signal.assert_not_called()
+            self.assertEqual(json.loads((p/'status.json').read_text())['state'],'running')
+            self.assertIn('background benchmark was not stopped',output.getvalue())
+
+    def test_watch_returns_failure_and_never_remeasures(self):
+        with tempfile.TemporaryDirectory() as d,contextlib.redirect_stdout(io.StringIO()):
+            p=Path(d);demo.write_json(p/'status.json',{'state':'failed','exit_code':7})
+            with patch.object(demo.subprocess,'Popen') as launch:
+                self.assertEqual(demo.watch(p),7);launch.assert_not_called()
+
+    def test_run_attaches_live_view_by_default(self):
+        pods={'items':[{'status':{'conditions':[{'type':'Ready','status':'True'}]}}]*2}
+        with tempfile.TemporaryDirectory() as d,patch.object(demo,'HOME_RESULTS',Path(d)),patch.object(demo,'ready_nodes'),patch.object(demo,'kubectl',return_value=json.dumps(pods)),patch.object(demo.subprocess,'Popen',return_value=Mock(pid=1234)) as launch,patch.object(demo,'watch',return_value=0) as monitor,contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(demo.start(),0)
+            monitor.assert_called_once()
+            self.assertEqual(monitor.call_args.kwargs['process'],launch.return_value)
+            self.assertTrue(launch.call_args.kwargs['start_new_session'])
+            self.assertIn('-u',launch.call_args.args[0])
 
     def test_worker_failure_retains_evidence_without_retry(self):
         with tempfile.TemporaryDirectory() as d,patch.object(demo,'HOME_RESULTS',Path(d)),patch.object(demo.subprocess,'call',return_value=7) as call,contextlib.redirect_stdout(io.StringIO()):

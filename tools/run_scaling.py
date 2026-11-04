@@ -187,7 +187,7 @@ def main(argv=None):
         for workers in levels:
             targets = [pods[(repeat - 1) % 2]] if workers == 1 else pods
             run_id = f"{args.compute_family}-p{workers}-r{repeat}"
-            print(f"Starting {run_id}: {args.tests} tests, {args.cycles} {workload['unit']} each", flush=True)
+            print(f"Batch {len(summaries)+1}/{args.repeats*2} — starting {run_id}: {args.tests} tests, {args.cycles} {workload['unit']} each", flush=True)
             summary = batch(args.namespace, targets, args.tests, args.cycles, run_id,
                             args.test_timeout, output / run_id, workload["command"])
             summaries.append(summary)

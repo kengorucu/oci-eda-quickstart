@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import time
 from workloads import WORKLOADS
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -69,7 +70,7 @@ def alive(pid):
     except (ProcessLookupError, PermissionError):
         return False
 
-def start():
+def start(detach=False):
     ready_nodes()
     pods = json.loads(kubectl(['-n', NAMESPACE, 'get', 'pods', '-l', f'poc-run={JOB}', '-o', 'json']))['items']
     if len(pods)!=2 or any(not any(c['type']=='Ready' and c['status']=='True' for c in p['status'].get('conditions',[])) for p in pods):
@@ -79,29 +80,31 @@ def start():
     try:
         lock.mkdir()
     except FileExistsError:
-        raise RuntimeError('A run lock exists. Inspect `python3 tools/demo.py status`. Do not start overlapping measurements. If the session was interrupted, use unlock after checking its processes.')
+        raise RuntimeError('A run lock exists. Inspect `python3 tools/demo.py watch`. Do not start overlapping measurements. If the session was interrupted, use unlock after checking its processes.')
     session = HOME_RESULTS / ('demo-'+stamp())
     try:
         session.mkdir()
         write_json(session/'status.json', {'state':'starting','started_utc':datetime.now(timezone.utc).isoformat(), 'workload_id':DEMO})
         write_json(HOME_RESULTS/'latest.json', {'session':str(session)})
         with (session/'controller.log').open('w') as log:
-            child = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), '_worker', '--demo', DEMO, '--session', str(session)], stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, start_new_session=True, close_fds=True)
+            child = subprocess.Popen([sys.executable, '-u', str(Path(__file__).resolve()), '_worker', '--demo', DEMO, '--session', str(session)], stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, start_new_session=True, close_fds=True)
         write_json(lock/'owner.json', {'session':str(session),'pid':child.pid})
     except Exception:
         shutil.rmtree(lock)
         raise
     print(f'Background benchmark started. Session: {session}')
-    print('Use: python3 tools/demo.py status')
-    print(f'Live log: tail -f {session}/controller.log')
     print('Cloud Shell terminal disconnections do not restart this measurement. A Cloud Shell environment reset can still interrupt it.')
+    if detach:
+        print('Monitor live: python3 tools/demo.py watch')
+        return 0
+    return watch(session, process=child)
 
 def worker(session):
     state = {'state':'running','pid':os.getpid(),'started_utc':datetime.now(timezone.utc).isoformat(), 'workload_id':DEMO}
     write_json(session/'status.json',state)
     code = 1
     try:
-        code = subprocess.call([sys.executable, str(ROOT/'tools/run_scaling.py'), '--compute-family','e6', '--workload',DEMO, '--worker-job',JOB, '--output',str(session)])
+        code = subprocess.call([sys.executable, '-u', str(ROOT/'tools/run_scaling.py'), '--compute-family','e6', '--workload',DEMO, '--worker-job',JOB, '--output',str(session)])
         results = sorted(session.glob('*/comparison.json'))
         if code == 0 and len(results) == 1:
             state['state'] = 'complete'; state['result_directory'] = str(results[0].parent)
@@ -122,6 +125,56 @@ def worker(session):
             if owner.exists() and json.loads(owner.read_text())['session']==str(session):
                 shutil.rmtree(lock)
     return code
+
+def watch(session, process=None, poll_interval=0.5):
+    """Stream appended log text; never start, restart or terminate the worker."""
+    print(f'Live progress: {session}', flush=True)
+    print('Ctrl+C stops this view; the benchmark continues. Reconnect with: python3 tools/demo.py watch', flush=True)
+    offset = 0
+    previous = None
+    try:
+        while True:
+            log = session/'controller.log'
+            if log.exists():
+                with log.open(errors='replace') as stream:
+                    stream.seek(offset)
+                    chunk = stream.read()
+                    offset = stream.tell()
+                if chunk:
+                    print(chunk, end='', flush=True)
+            state = json.loads((session/'status.json').read_text())
+            if state['state'] != previous:
+                print(f"\nState: {state['state']}", flush=True)
+                previous = state['state']
+            if state['state'] in ('complete', 'failed', 'interrupted'):
+                # The state write is the completion boundary. Drain any last log
+                # bytes appended between this loop's first read and that write.
+                if log.exists():
+                    with log.open(errors='replace') as stream:
+                        stream.seek(offset)
+                        print(stream.read(), end='', flush=True)
+                return 0 if state['state']=='complete' else (state.get('exit_code') or 1)
+            pid = state.get('pid')
+            if not pid:
+                owner=HOME_RESULTS/'.active/owner.json'
+                if owner.exists():
+                    record=json.loads(owner.read_text())
+                    if record.get('session')==str(session):pid=record.get('pid')
+            exited = process.poll() is not None if process is not None else (pid is not None and not alive(pid))
+            if exited:
+                # Recheck completion after observing process exit to avoid
+                # confusing a final status update with an interrupted run.
+                current=json.loads((session/'status.json').read_text())
+                if current['state'] in ('complete','failed','interrupted'):
+                    continue
+                current.update(state='interrupted', error='Controller exited before recording completion.')
+                write_json(session/'status.json', current)
+                print('Controller interrupted. Evidence retained; no automatic restart.', flush=True)
+                return 1
+            time.sleep(poll_interval)
+    except KeyboardInterrupt:
+        print('\nLive view closed. The background benchmark was not stopped. Reattach with: python3 tools/demo.py watch', flush=True)
+        return 0
 
 def status(session):
     data=json.loads((session/'status.json').read_text())
@@ -173,14 +226,16 @@ def unlock():
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command',choices=['prepare','run','status','export','cleanup','unlock','_worker'])
+    parser.add_argument('command',choices=['prepare','run','watch','status','export','cleanup','unlock','_worker'])
     parser.add_argument('--session',help='Result session path; defaults to latest session')
     parser.add_argument('--demo', choices=list(WORKLOADS), default='rtl')
+    parser.add_argument('--detach', action='store_true', help='Start without attaching the live view (run only)')
     args=parser.parse_args()
     global DEMO, JOB
     DEMO=args.demo; JOB=WORKLOADS[DEMO]['job']
     if args.command=='prepare': prepare()
-    elif args.command=='run': start()
+    elif args.command=='run': return start(detach=args.detach)
+    elif args.command=='watch': return watch(selected_session(args.session))
     elif args.command=='cleanup': cleanup()
     elif args.command=='unlock': unlock()
     elif args.command=='_worker': return worker(selected_session(args.session))

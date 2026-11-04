@@ -135,19 +135,22 @@ python3 tools/demo.py run --demo rtl
 
 The controller checks worker placement, matching software inventories, source hashes and pod resource limits. It runs an unmeasured warm-up, then six measured batches: three at one worker and three at two workers. Each test must report a correctness pass.
 
-The controller runs in the background and saves its evidence under `~/eda-e6-demo-results/`. Check progress with:
+The run command **prints progress live in the terminal**: warm-up, batch number out of six, active worker count, PASS/FAIL, measured batch times and the final results. The controller continues in the background and saves evidence under `~/eda-e6-demo-results/`.
+
+**Ctrl+C closes only the live view; it does not stop the benchmark.** After reconnecting to Cloud Shell, resume the live view without starting another measurement:
 
 ```sh
-python3 tools/demo.py status
+cd ~/e6-oke-demo
+python3 tools/demo.py watch
 ```
 
-The reference run took approximately **18 minutes**, excluding provisioning and preparation; your runtime may differ. A terminal disconnect does not automatically restart the benchmark. Reconnect and inspect status before taking further action. A Cloud Shell reset or termination can still interrupt the controller.
+The live view exits automatically when the run finishes and preserves the worker's success or failure exit code. The reference run took approximately **18 minutes**, excluding provisioning and preparation; your runtime may differ. A Cloud Shell reset or termination can still interrupt the background controller.
 
 Run one controller at a time. The worker pods have a four-hour deadline from creation, so complete the measurement within that period.
 
 ## 5. Export and analyze the results
 
-When status reports `complete`, export the results:
+When the live output reports `State: complete`, export the results:
 
 ```sh
 python3 tools/demo.py export
