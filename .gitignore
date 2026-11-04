@@ -1,0 +1,11 @@
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+terraform.tfvars
+*.auto.tfvars
+__pycache__/
+*.pyc
+.DS_Store
+kubeconfig
+eda-e6-demo-results/

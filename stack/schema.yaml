@@ -1,0 +1,78 @@
+title: OCI EDA Quickstart
+description: Deploy two OCI E6 managed workers on OKE to run a self-checking digital RTL simulation and measure scaling from one worker to two. Includes dedicated networking and automatic Oracle Linux OKE image selection.
+schemaVersion: 1.1.0
+version: "1.1.0"
+locale: en
+variableGroups:
+  - title: Deployment location and access
+    variables:
+      - region
+      - compartment_ocid
+      - availability_domain
+      - admin_cidr
+      - name
+  - title: OKE version and image
+    variables:
+      - kubernetes_version
+      - node_os_major_version
+  - title: E6 workers
+    variables:
+      - node_count
+      - node_ocpus
+      - node_memory_gbs
+variables:
+  region:
+    default: eu-frankfurt-1
+    type: string
+    required: true
+    title: OCI region
+  compartment_ocid:
+    type: string
+    required: true
+    title: Existing compartment OCID
+  availability_domain:
+    type: string
+    required: true
+    title: Full availability domain name with E6 capacity
+  admin_cidr:
+    type: string
+    required: true
+    title: Trusted public egress IPv4 CIDR (/32 recommended)
+  name:
+    type: string
+    title: Resource name prefix
+    default: eda-e6-demo
+  kubernetes_version:
+    type: string
+    required: true
+    title: Supported Kubernetes version (v prefix)
+  node_image_ocid:
+    type: string
+    visible: false
+    default: ""
+    title: Optional image override (automatic when empty)
+  node_os_major_version:
+    type: enum
+    title: Oracle Linux version (OKE image is selected automatically)
+    default: "9"
+    enum:
+      - "9"
+      - "8"
+  node_count:
+    type: integer
+    minimum: 2
+    maximum: 2
+    default: 2
+    title: E6 worker nodes
+  node_ocpus:
+    type: integer
+    minimum: 2
+    maximum: 94
+    default: 16
+    title: OCPUs per worker
+  node_memory_gbs:
+    type: integer
+    minimum: 16
+    maximum: 712
+    default: 128
+    title: Memory GB per worker

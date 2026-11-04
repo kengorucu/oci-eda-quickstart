@@ -1,0 +1,171 @@
+{
+  "apiVersion": "v1",
+  "kind": "List",
+  "items": [
+    {
+      "apiVersion": "v1",
+      "kind": "Namespace",
+      "metadata": {
+        "name": "eda-native-poc"
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "ConfigMap",
+      "immutable": true,
+      "metadata": {
+        "name": "eda-e6-rtl-workers-files",
+        "namespace": "eda-native-poc",
+        "labels": {
+          "app.kubernetes.io/name": "e6-compute-lab",
+          "poc-run": "eda-e6-rtl-workers",
+          "demo-workload": "rtl"
+        }
+      },
+      "data": {
+        "runner.py": "#!/usr/bin/env python3\n\"\"\"Run a deterministic shard of test seeds; emit one JSON timing record per seed.\n\nSIM_COMMAND_JSON is an argv array, with optional {seed}/{cycles} placeholders.\nCustom simulator wrappers must exit nonzero for test failures. No shell is used.\n\"\"\"\nimport hashlib\nimport json\nimport os\nimport platform\nimport resource\nimport shlex\nimport subprocess\nimport sys\nimport time\n\n\ndef emit(record):\n    print(\"POC_RESULT \" + json.dumps(record, sort_keys=True), flush=True)\n\n\ndef positive(name, default):\n    value = int(os.environ.get(name, default))\n    if value <= 0:\n        raise ValueError(f\"{name} must be positive\")\n    return value\n\n\ndef main():\n    total = positive(\"TOTAL_TESTS\", \"32\")\n    shards = positive(\"SHARDS\", \"4\")\n    index = int(os.environ.get(\"JOB_COMPLETION_INDEX\", \"0\"))\n    if index < 0 or index >= shards:\n        raise ValueError(\"JOB_COMPLETION_INDEX must be in [0, SHARDS)\")\n    cycles = positive(\"SIM_CYCLES\", \"1000000\")\n    timeout = positive(\"TEST_TIMEOUT_SECONDS\", \"1800\")\n    base_seed = positive(\"BASE_SEED\", \"1000\")\n    template = json.loads(os.environ.get(\n        \"SIM_COMMAND_JSON\", '[\"/opt/poc/sim\", \"+seed={seed}\", \"+cycles={cycles}\"]'))\n    if not isinstance(template, list) or not template or not all(isinstance(s, str) for s in template):\n        raise ValueError(\"SIM_COMMAND_JSON must be a nonempty JSON array of strings\")\n    command_hash = hashlib.sha256(json.dumps(template).encode()).hexdigest()\n    cpu_model = \"unknown\"\n    try:\n        with open(\"/proc/cpuinfo\") as cpuinfo:\n            cpu_model = next((line.split(\":\", 1)[1].strip() for line in cpuinfo\n                              if line.startswith(\"model name\")), \"unknown\")\n    except OSError:\n        pass\n    emit({\"event\": \"shard_start\", \"shard\": index, \"shards\": shards,\n          \"total_tests\": total, \"hostname\": platform.node(),\n          \"architecture\": platform.machine(), \"command_sha256\": command_hash,\n          \"cpu_model\": cpu_model, \"cycles\": cycles, \"base_seed\": base_seed,\n          \"run_id\": os.environ.get(\"RUN_ID\", \"local\"),\n          \"suite_id\": os.environ.get(\"SUITE_ID\", \"rtl-smoke-v1\"),\n          \"time_unix\": time.time()})\n    failures = 0\n    for test in range(index, total, shards):\n        seed = base_seed + test\n        argv = [arg.replace(\"{seed}\", str(seed)).replace(\"{cycles}\", str(cycles)) for arg in template]\n        print(\"Running \" + shlex.join(argv), flush=True)\n        before = resource.getrusage(resource.RUSAGE_CHILDREN)\n        started_unix = time.time()\n        start = time.perf_counter()\n        timed_out = False\n        try:\n            # Each command gets a new process group, so timeout kills descendants too.\n            proc = subprocess.Popen(argv, start_new_session=True)\n            try:\n                rc = proc.wait(timeout=timeout)\n            except subprocess.TimeoutExpired:\n                import signal\n                timed_out = True\n                try:\n                    os.killpg(proc.pid, signal.SIGKILL)\n                except ProcessLookupError:\n                    pass\n                proc.wait()\n                rc = 124\n        except OSError as exc:\n            print(str(exc), file=sys.stderr, flush=True)\n            rc = 127\n        elapsed = time.perf_counter() - start\n        after = resource.getrusage(resource.RUSAGE_CHILDREN)\n        failures += int(rc != 0)\n        emit({\"event\": \"test\", \"test_id\": test, \"seed\": seed, \"shard\": index,\n              \"run_id\": os.environ.get(\"RUN_ID\", \"local\"),\n              \"suite_id\": os.environ.get(\"SUITE_ID\", \"rtl-smoke-v1\"),\n              \"started_unix\": started_unix, \"elapsed_seconds\": elapsed,\n              \"cpu_seconds\": after.ru_utime + after.ru_stime - before.ru_utime - before.ru_stime,\n              \"exit_code\": rc, \"timed_out\": timed_out})\n    emit({\"event\": \"shard_end\", \"shard\": index, \"failures\": failures, \"time_unix\": time.time()})\n    return int(failures > 0)\n\n\nif __name__ == \"__main__\":\n    try:\n        sys.exit(main())\n    except (ValueError, TypeError, json.JSONDecodeError) as exc:\n        print(f\"Invalid runner configuration: {exc}\", file=sys.stderr)\n        sys.exit(2)\n\n",
+        "bootstrap.sh": "#!/usr/bin/env bash\nset -euo pipefail\n\n# Functional smoke-test preparation inside the pod, never on the worker host.\n# Use Oracle repositories; do not disable signature checks or FIPS settings.\nprintf 'POC_STAGE package-install-start\\n'\ndnf -y install oracle-epel-release-el9\ndnf -y --enablerepo=ol9_developer_EPEL,ol9_codeready_builder install \\\n  verilator verilator-devel gcc-c++ make python3\ndnf clean all\nprintf 'POC_STAGE package-install-complete\\n'\nverilator --version\ng++ --version\nrpm -q verilator verilator-devel gcc-c++ python3\n\nprintf 'POC_STAGE compile-start\\n'\nverilator --binary --timing -Wno-fatal -O3 -j 2 \\\n  -CFLAGS '-std=c++20' --top-module tb --Mdir /work/obj \\\n  /config/mac.sv /config/tb.sv\nprintf 'POC_STAGE compile-complete\\n'\n\nif [ \"${POC_PREPARE_ONLY:-0}\" = \"1\" ]; then\n  /work/obj/Vtb +seed=999 +cycles=1000000\n  touch /work/prepared\n  printf 'POC_STAGE prepared-for-scaling\\n'\n  # The operator runs measured batches through kubectl exec after ALL pods are\n  # ready. Setup, image pulls, and compilation cannot overlap measured tests.\n  exec sleep 14400\nfi\n\nexport SIM_COMMAND_JSON='[\"/work/obj/Vtb\", \"+seed={seed}\", \"+cycles={cycles}\"]'\nprintf 'POC_STAGE simulation-start\\n'\nexec python3 /config/runner.py\n\n",
+        "mac.sv": "// Deliberately small functional smoke test, not a representative customer design.\nmodule mac(input logic clk, input logic [31:0] a, b,\n           input logic [63:0] acc, output logic [63:0] result);\n  always_ff @(posedge clk) result <= (64'(a) * 64'(b)) + acc;\nendmodule\n\n",
+        "tb.sv": "module tb;\n  logic clk = 0;\n  logic [31:0] a = 0, b = 0;\n  logic [63:0] acc = 0, result, expected;\n  longint unsigned state;\n  int unsigned seed = 1;\n  int unsigned cycles = 1000000;\n  mac dut(.*);\n  always #5 clk = ~clk;\n  initial begin\n    if ($value$plusargs(\"seed=%d\", seed)) begin end\n    if ($value$plusargs(\"cycles=%d\", cycles)) begin end\n    state = 64'(seed) + 1;\n    for (int unsigned i = 0; i < cycles; i++) begin\n      @(negedge clk);\n      state ^= state << 13;\n      state ^= state >> 7;\n      state ^= state << 17;\n      a = state[31:0];\n      b = state[63:32];\n      acc = 64'(i);\n      expected = (64'(a) * 64'(b)) + acc;\n      @(posedge clk);\n      #1;\n      if (result !== expected) $fatal(1, \"Mismatch seed=%0d cycle=%0d\", seed, i);\n    end\n    $display(\"POC_TEST_PASS seed=%0d cycles=%0d\", seed, cycles);\n    $finish;\n  end\nendmodule\n\n"
+      }
+    },
+    {
+      "apiVersion": "batch/v1",
+      "kind": "Job",
+      "metadata": {
+        "name": "eda-e6-rtl-workers",
+        "namespace": "eda-native-poc",
+        "labels": {
+          "app.kubernetes.io/name": "e6-compute-lab",
+          "poc-run": "eda-e6-rtl-workers",
+          "demo-workload": "rtl"
+        }
+      },
+      "spec": {
+        "completionMode": "Indexed",
+        "completions": 2,
+        "parallelism": 2,
+        "backoffLimit": 0,
+        "activeDeadlineSeconds": 14400,
+        "template": {
+          "metadata": {
+            "labels": {
+              "app.kubernetes.io/name": "e6-compute-lab",
+              "poc-run": "eda-e6-rtl-workers",
+              "demo-workload": "rtl"
+            }
+          },
+          "spec": {
+            "restartPolicy": "Never",
+            "automountServiceAccountToken": false,
+            "nodeSelector": {
+              "compute-family": "e6",
+              "workload": "eda-regression",
+              "node.kubernetes.io/instance-type": "VM.Standard.E6.Flex",
+              "kubernetes.io/arch": "amd64"
+            },
+            "affinity": {
+              "podAntiAffinity": {
+                "requiredDuringSchedulingIgnoredDuringExecution": [
+                  {
+                    "labelSelector": {
+                      "matchLabels": {
+                        "poc-run": "eda-e6-rtl-workers"
+                      }
+                    },
+                    "topologyKey": "kubernetes.io/hostname"
+                  }
+                ]
+              }
+            },
+            "securityContext": {
+              "runAsUser": 0,
+              "runAsGroup": 0,
+              "seccompProfile": {
+                "type": "RuntimeDefault"
+              }
+            },
+            "containers": [
+              {
+                "name": "simulator",
+                "image": "container-registry.oracle.com/os/oraclelinux@sha256:5bee349a258651feacff106744630539156568ff173788563d3727f0338a1941",
+                "imagePullPolicy": "Always",
+                "command": [
+                  "/bin/bash",
+                  "/config/bootstrap.sh"
+                ],
+                "env": [
+                  {
+                    "name": "POC_PREPARE_ONLY",
+                    "value": "1"
+                  },
+                  {
+                    "name": "DEMO_WORKLOAD",
+                    "value": "rtl"
+                  }
+                ],
+                "workingDir": "/work",
+                "resources": {
+                  "requests": {
+                    "cpu": "2",
+                    "memory": "4Gi",
+                    "ephemeral-storage": "4Gi"
+                  },
+                  "limits": {
+                    "cpu": "2",
+                    "memory": "4Gi",
+                    "ephemeral-storage": "12Gi"
+                  }
+                },
+                "securityContext": {
+                  "allowPrivilegeEscalation": false,
+                  "capabilities": {
+                    "drop": [
+                      "NET_RAW"
+                    ]
+                  }
+                },
+                "volumeMounts": [
+                  {
+                    "name": "config",
+                    "mountPath": "/config",
+                    "readOnly": true
+                  },
+                  {
+                    "name": "work",
+                    "mountPath": "/work"
+                  }
+                ],
+                "readinessProbe": {
+                  "exec": {
+                    "command": [
+                      "/bin/bash",
+                      "-c",
+                      "test -f /work/prepared"
+                    ]
+                  },
+                  "periodSeconds": 5,
+                  "timeoutSeconds": 2
+                }
+              }
+            ],
+            "volumes": [
+              {
+                "name": "config",
+                "configMap": {
+                  "name": "eda-e6-rtl-workers-files"
+                }
+              },
+              {
+                "name": "work",
+                "emptyDir": {
+                  "sizeLimit": "4Gi"
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  ]
+}

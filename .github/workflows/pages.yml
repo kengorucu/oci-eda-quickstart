@@ -1,0 +1,57 @@
+name: Publish E6 demo
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: e6-demo-pages
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: '1.5.7'
+      - name: Validate Terraform
+        run: |
+          terraform -chdir=stack fmt -check
+          terraform -chdir=stack init -backend=false -input=false
+          terraform -chdir=stack validate
+      - name: Test operator and package
+        run: |
+          python3 tools/build.py --repository "$GITHUB_REPOSITORY" --release "demo-$GITHUB_SHA"
+          python3 -m unittest discover -s tests -v
+      - name: Publish versioned demo downloads
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="demo-$GITHUB_SHA"
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            gh release create "$tag" --target "$GITHUB_SHA" --title "E6 OKE demo ${GITHUB_SHA:0:7}" --notes "Terraform stack and benchmark operator for this source revision."
+          fi
+          gh release upload "$tag" docs/downloads/oke-e6-stack.zip docs/downloads/oke-e6-benchmark.zip docs/downloads/SHA256SUMS --clobber
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: docs
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/configure-pages@v5
+      - uses: actions/deploy-pages@v4
+        id: deployment
