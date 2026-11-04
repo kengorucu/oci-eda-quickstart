@@ -18,12 +18,30 @@ Enter the returned IPv4 address followed by /32 as admin_cidr. Availability-doma
 
 ## 2. Connect
 
-Run the create_kubeconfig command shown in stack outputs, then:
+Use one file for both generating the configuration and running kubectl. Replace the cluster ID placeholder with the stack's cluster_id output and set the deployment region:
 
 ```sh
+# Replace this value with cluster_id from the stack outputs.
+DEMO_CLUSTER_OCID="REPLACE_WITH_CLUSTER_ID_OUTPUT"
+# Set this to your deployment region.
+DEMO_REGION="eu-frankfurt-1"
+
 export KUBECONFIG="$HOME/.kube/eda-e6-demo-config"
-kubectl --request-timeout=10s get nodes -o wide -L compute-family,node.kubernetes.io/instance-type
+mkdir -p "$HOME/.kube"
+
+oci ce cluster create-kubeconfig \
+  --cluster-id "$DEMO_CLUSTER_OCID" \
+  --region "$DEMO_REGION" \
+  --file "$KUBECONFIG" \
+  --token-version 2.0.0 \
+  --kube-endpoint PUBLIC_ENDPOINT
+
+kubectl config current-context
+kubectl --request-timeout=10s get nodes -o wide \
+  -L compute-family,node.kubernetes.io/instance-type
 ```
+
+If copying the OKE Console's Access cluster command, change its --file value to "$KUBECONFIG". The Console's default ~/.kube/config differs from this quickstart's file. Export KUBECONFIG again after starting a new shell session. A missing context or localhost:8080 endpoint means the cluster configuration has not been loaded.
 
 You need two Ready VM.Standard.E6.Flex nodes labelled compute-family=e6 and workload=eda-regression.
 

@@ -77,14 +77,30 @@ Run **Plan**. For a new stack, expect **12 resources to add, zero to change and 
 
 ## 2. Connect to OKE
 
-Copy the `create_kubeconfig` command from the stack outputs and run it in Cloud Shell. Then run:
+Use the **same kubeconfig file** for OCI CLI and kubectl. Replace `REPLACE_WITH_CLUSTER_ID_OUTPUT` with `cluster_id` from the stack outputs, and set the deployment region before running:
 
 ```sh
-export KUBECONFIG="$HOME/.kube/eda-e6-demo-config"
+# Replace this value with cluster_id from the stack outputs.
+DEMO_CLUSTER_OCID="REPLACE_WITH_CLUSTER_ID_OUTPUT"
+# Set this to your deployment region.
+DEMO_REGION="eu-frankfurt-1"
 
+export KUBECONFIG="$HOME/.kube/eda-e6-demo-config"
+mkdir -p "$HOME/.kube"
+
+oci ce cluster create-kubeconfig \
+  --cluster-id "$DEMO_CLUSTER_OCID" \
+  --region "$DEMO_REGION" \
+  --file "$KUBECONFIG" \
+  --token-version 2.0.0 \
+  --kube-endpoint PUBLIC_ENDPOINT
+
+kubectl config current-context
 kubectl --request-timeout=10s get nodes -o wide \
   -L compute-family,node.kubernetes.io/instance-type
 ```
+
+The OKE Console's **Access cluster** example may write to `$HOME/.kube/config`. If you use that example, change its `--file` argument to `"$KUBECONFIG"` after setting the variable above. Setting `KUBECONFIG` selects a file; it does not create a cluster context. Repeat the export when opening a new Cloud Shell session.
 
 Confirm that both nodes are **Ready**, with shape `VM.Standard.E6.Flex` and label `compute-family=e6`.
 
